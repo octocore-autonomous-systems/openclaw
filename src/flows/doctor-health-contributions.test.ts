@@ -7,6 +7,8 @@ import {
 const mocks = vi.hoisted(() => ({
   maybeRunConfiguredPluginInstallReleaseStep: vi.fn(),
   note: vi.fn(),
+  discoverConfigSecretTargets: vi.fn(),
+  getPath: vi.fn(),
 }));
 
 vi.mock("../commands/doctor/shared/release-configured-plugin-installs.js", () => ({
@@ -21,6 +23,14 @@ vi.mock("../version.js", () => ({
   VERSION: "2026.5.2-test",
 }));
 
+vi.mock("../secrets/target-registry.js", () => ({
+  discoverConfigSecretTargets: mocks.discoverConfigSecretTargets,
+}));
+
+vi.mock("../secrets/path-utils.js", () => ({
+  getPath: mocks.getPath,
+}));
+
 function requireDoctorContribution(id: string) {
   const contribution = resolveDoctorHealthContributions().find((entry) => entry.id === id);
   if (!contribution) {
@@ -33,6 +43,10 @@ describe("doctor health contributions", () => {
   beforeEach(() => {
     mocks.maybeRunConfiguredPluginInstallReleaseStep.mockReset();
     mocks.note.mockReset();
+    mocks.discoverConfigSecretTargets.mockReset();
+    mocks.discoverConfigSecretTargets.mockReturnValue([]);
+    mocks.getPath.mockReset();
+    mocks.getPath.mockReturnValue(undefined);
   });
 
   it("runs release configured plugin install repair before plugin registry and final config writes", () => {
@@ -140,5 +154,99 @@ describe("doctor health contributions", () => {
         },
       }),
     ).toBe(false);
+  });
+
+  it("registers secret-resolve preflight before final config writes", () => {
+    const ids = resolveDoctorHealthContributions().map((entry) => entry.id);
+
+    expect(ids.indexOf("doctor:secret-resolve-preflight")).toBeGreaterThan(-1);
+    expect(ids.indexOf("doctor:secret-resolve-preflight")).toBeLessThan(
+      ids.indexOf("doctor:write-config"),
+    );
+  });
+
+  it("emits no secret-resolve preflight note when the registry yields no targets", async () => {
+    mocks.discoverConfigSecretTargets.mockReturnValue([]);
+    const contribution = requireDoctorContribution("doctor:secret-resolve-preflight");
+    const ctx = { cfg: {} } as Parameters<(typeof contribution)["run"]>[0];
+
+    await contribution.run(ctx);
+
+    expect(mocks.note).not.toHaveBeenCalled();
+  });
+
+  it("emits no secret-resolve preflight note when sibling_ref value paths are populated", async () => {
+    mocks.discoverConfigSecretTargets.mockReturnValue([
+      {
+        entry: { secretShape: "sibling_ref" },
+        path: "profiles.p1.key",
+        pathSegments: ["profiles", "p1", "key"],
+      },
+    ]);
+    mocks.getPath.mockReturnValue("resolved-value");
+    const contribution = requireDoctorContribution("doctor:secret-resolve-preflight");
+    const ctx = { cfg: {} } as Parameters<(typeof contribution)["run"]>[0];
+
+    await contribution.run(ctx);
+
+    expect(mocks.note).not.toHaveBeenCalled();
+  });
+
+  it("emits no note when secret_input value paths are absent (apply will not crash)", async () => {
+    mocks.discoverConfigSecretTargets.mockReturnValue([
+      {
+        entry: { secretShape: "secret_input" },
+        path: "agents.defaults.memorySearch.remote.apiKey",
+        pathSegments: ["agents", "defaults", "memorySearch", "remote", "apiKey"],
+      },
+    ]);
+    mocks.getPath.mockReturnValue(undefined);
+    const contribution = requireDoctorContribution("doctor:secret-resolve-preflight");
+    const ctx = { cfg: {} } as Parameters<(typeof contribution)["run"]>[0];
+
+    await contribution.run(ctx);
+
+    expect(mocks.note).not.toHaveBeenCalled();
+  });
+
+  it("warns when a sibling_ref target's value path is absent", async () => {
+    mocks.discoverConfigSecretTargets.mockReturnValue([
+      {
+        entry: { secretShape: "sibling_ref" },
+        path: "profiles.p1.key",
+        pathSegments: ["profiles", "p1", "key"],
+      },
+    ]);
+    mocks.getPath.mockReturnValue(undefined);
+    const contribution = requireDoctorContribution("doctor:secret-resolve-preflight");
+    const ctx = { cfg: {} } as Parameters<(typeof contribution)["run"]>[0];
+
+    await contribution.run(ctx);
+
+    expect(mocks.note).toHaveBeenCalledTimes(1);
+    const [body, label] = mocks.note.mock.calls[0]!;
+    expect(label).toBe("Secret resolve preflight");
+    expect(body).toContain("profiles.p1.key");
+    expect(body).toContain("PR #78555");
+  });
+
+  it("warns when a secretShape is unknown to this CLI build", async () => {
+    mocks.discoverConfigSecretTargets.mockReturnValue([
+      {
+        entry: { secretShape: "future_shape" },
+        path: "future.target.path",
+        pathSegments: ["future", "target", "path"],
+      },
+    ]);
+    const contribution = requireDoctorContribution("doctor:secret-resolve-preflight");
+    const ctx = { cfg: {} } as Parameters<(typeof contribution)["run"]>[0];
+
+    await contribution.run(ctx);
+
+    expect(mocks.note).toHaveBeenCalledTimes(1);
+    const [body, label] = mocks.note.mock.calls[0]!;
+    expect(label).toBe("Secret resolve preflight");
+    expect(body).toContain("future.target.path");
+    expect(body).toContain("future_shape");
   });
 });

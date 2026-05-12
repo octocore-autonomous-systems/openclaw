@@ -114,6 +114,52 @@ async function runGatewayConfigHealth(ctx: DoctorHealthFlowContext): Promise<voi
   }
 }
 
+async function runSecretResolvePreflight(ctx: DoctorHealthFlowContext): Promise<void> {
+  const { discoverConfigSecretTargets } = await import("../secrets/target-registry.js");
+  const { getPath } = await import("../secrets/path-utils.js");
+  const { note } = await import("../terminal/note.js");
+
+  const targets = discoverConfigSecretTargets(ctx.cfg);
+  const missingSiblingRefValuePaths: string[] = [];
+  const unknownShapes: Array<{ path: string; shape: string }> = [];
+
+  for (const target of targets) {
+    const shape = target.entry.secretShape;
+    if (shape === "sibling_ref") {
+      if (getPath(ctx.cfg, target.pathSegments) === undefined) {
+        missingSiblingRefValuePaths.push(target.path);
+      }
+    } else if (shape !== "secret_input") {
+      unknownShapes.push({ path: target.path, shape: String(shape) });
+    }
+  }
+
+  if (missingSiblingRefValuePaths.length > 0) {
+    note(
+      [
+        "Detected sibling_ref SecretRef target(s) whose value path is absent in source config:",
+        ...missingSiblingRefValuePaths.map((path) => `  - ${path}`),
+        "If you encounter 'Cannot set value at non-existent path' errors during status, channels",
+        "list, or doctor, upgrade openclaw to a build that applies these SecretRefs via",
+        "setPathCreateStrict (see PR #78555).",
+      ].join("\n"),
+      "Secret resolve preflight",
+    );
+  }
+
+  if (unknownShapes.length > 0) {
+    note(
+      [
+        "Detected SecretRef target(s) with a secretShape this CLI build does not recognize:",
+        ...unknownShapes.map((entry) => `  - ${entry.path} (shape: ${entry.shape})`),
+        "This usually indicates a gateway/CLI version skew. Upgrade openclaw so both sides agree",
+        "on the shape vocabulary.",
+      ].join("\n"),
+      "Secret resolve preflight",
+    );
+  }
+}
+
 async function runAuthProfileHealth(ctx: DoctorHealthFlowContext): Promise<void> {
   const { maybeRepairLegacyFlatAuthProfileStores } =
     await import("../commands/doctor-auth-flat-profiles.js");
@@ -661,6 +707,11 @@ export function resolveDoctorHealthContributions(): DoctorHealthContribution[] {
       id: "doctor:gateway-auth",
       label: "Gateway auth",
       run: runGatewayAuthHealth,
+    }),
+    createDoctorHealthContribution({
+      id: "doctor:secret-resolve-preflight",
+      label: "Secret resolve preflight",
+      run: runSecretResolvePreflight,
     }),
     createDoctorHealthContribution({
       id: "doctor:command-owner",
